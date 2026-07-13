@@ -33,9 +33,7 @@ const STORAGE_KEY = "wortklar-groq-settings";
 export default function Home() {
   const [direction, setDirection] = useState<Direction>("ru-de");
   const [text, setText] = useState("");
-  const [apiKey, setApiKey] = useState("");
   const [model, setModel] = useState("openai/gpt-oss-20b");
-  const [rememberKey, setRememberKey] = useState(true);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
@@ -45,10 +43,8 @@ export default function Home() {
     const saved = localStorage.getItem(STORAGE_KEY);
     if (!saved) return;
     try {
-      const settings = JSON.parse(saved) as { apiKey?: string; model?: string; rememberKey?: boolean };
-      setApiKey(settings.apiKey ?? "");
+      const settings = JSON.parse(saved) as { model?: string };
       setModel(settings.model ?? "openai/gpt-oss-20b");
-      setRememberKey(settings.rememberKey ?? true);
     } catch {
       localStorage.removeItem(STORAGE_KEY);
     }
@@ -65,7 +61,7 @@ export default function Home() {
   function saveSettings() {
     localStorage.setItem(
       STORAGE_KEY,
-      JSON.stringify({ apiKey: rememberKey ? apiKey.trim() : "", model: model.trim(), rememberKey })
+      JSON.stringify({ model: model.trim() })
     );
     setSettingsOpen(false);
   }
@@ -79,11 +75,6 @@ export default function Home() {
   async function translate(event: FormEvent) {
     event.preventDefault();
     if (!text.trim()) return;
-    if (!apiKey.trim()) {
-      setSettingsOpen(true);
-      setError("Добавьте API-ключ в настройках.");
-      return;
-    }
 
     setLoading(true);
     setError("");
@@ -91,7 +82,7 @@ export default function Home() {
       const response = await fetch("/api/translate", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ text: text.trim(), direction, apiKey: apiKey.trim(), model: model.trim() })
+        body: JSON.stringify({ text: text.trim(), direction, model: model.trim() })
       });
       const data = await response.json();
       if (!response.ok) throw new Error(data.error || "Не удалось выполнить перевод.");
@@ -199,20 +190,16 @@ export default function Home() {
         <div className="modalBackdrop" onMouseDown={() => setSettingsOpen(false)}>
           <section className="settingsModal" onMouseDown={(event) => event.stopPropagation()} role="dialog" aria-modal="true" aria-labelledby="settings-title">
             <div className="modalHeader">
-              <div><small>Настройки</small><h2 id="settings-title">Подключение API</h2></div>
+              <div><small>Настройки</small><h2 id="settings-title">Модель перевода</h2></div>
               <button type="button" className="closeButton" onClick={() => setSettingsOpen(false)}>×</button>
             </div>
-            <label className="fieldLabel">Groq API key
-              <input type="password" value={apiKey} onChange={(event) => setApiKey(event.target.value)} placeholder="gsk_…" autoComplete="off" />
-            </label>
-            <p className="fieldHint">Ключ передаётся только вашему серверному маршруту и Groq. В репозиторий он не попадает.</p>
+            <p className="fieldHint">Groq подключён безопасно через серверный секрет Cloudflare. Ключ не хранится в браузере.</p>
             <label className="fieldLabel">Модель
               <select value={model} onChange={(event) => setModel(event.target.value)}>
                 <option value="openai/gpt-oss-20b">GPT-OSS 20B — экономно</option>
                 <option value="openai/gpt-oss-120b">GPT-OSS 120B — точнее</option>
               </select>
             </label>
-            <label className="checkLabel"><input type="checkbox" checked={rememberKey} onChange={(event) => setRememberKey(event.target.checked)} />Сохранить ключ в этом браузере</label>
             <button className="primaryButton modalSave" type="button" onClick={saveSettings}>Сохранить</button>
           </section>
         </div>

@@ -1,5 +1,10 @@
 type PagesContext = {
   request: Request;
+  env: {
+    apikey?: string;
+    APIKEY?: string;
+    GROQ_API_KEY?: string;
+  };
 };
 
 const systemPrompt = `Ты — точный русско-немецкий учебный переводчик.
@@ -91,12 +96,17 @@ export async function onRequestPost(context: PagesContext): Promise<Response> {
     const body = await context.request.json() as Record<string, unknown>;
     const text = typeof body.text === "string" ? body.text.trim() : "";
     const direction = body.direction === "de-ru" ? "de-ru" : "ru-de";
-    const apiKey = typeof body.apiKey === "string" ? body.apiKey.trim() : "";
+    const apiKey = (
+      context.env.apikey ??
+      context.env.APIKEY ??
+      context.env.GROQ_API_KEY ??
+      ""
+    ).trim();
     const requestedModel = typeof body.model === "string" ? body.model.trim() : "";
     const model = allowedModels.has(requestedModel) ? requestedModel : "openai/gpt-oss-20b";
 
     if (!text) return json({ error: "Введите текст для перевода." }, 400);
-    if (!apiKey) return json({ error: "Не указан API-ключ." }, 400);
+    if (!apiKey) return json({ error: "Секрет Groq API не настроен на сервере." }, 500);
 
     const userPrompt = direction === "ru-de"
       ? `Переведи с русского на немецкий и сделай учебный разбор: ${text}`
