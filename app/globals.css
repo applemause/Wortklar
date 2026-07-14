@@ -105,6 +105,7 @@ textarea::-webkit-scrollbar { display: none; }
 }
 
 .submitButton:hover:not(:disabled) { transform: translateX(2px); }
+.submitButton.clear:hover:not(:disabled) { transform: none; }
 .submitButton:disabled { opacity: .16; cursor: default; }
 .submitButton svg { width: 19px; fill: none; stroke: currentColor; stroke-linecap: round; stroke-linejoin: round; stroke-width: 1.8; }
 

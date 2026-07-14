@@ -40,10 +40,12 @@ export default function Home() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [result, setResult] = useState<TranslationResult | null>(null);
+  const hasCurrentTranslation = Boolean(result && text === result.query);
 
   function handleKeyDown(event: KeyboardEvent<HTMLTextAreaElement>) {
     if (event.key === "Enter" && !event.shiftKey) {
       event.preventDefault();
+      event.currentTarget.blur();
       event.currentTarget.form?.requestSubmit();
     }
   }
@@ -63,7 +65,7 @@ export default function Home() {
       });
       const data = await response.json();
       if (!response.ok) throw new Error(data.error || "Не удалось выполнить перевод.");
-      setResult({ ...data, query: submittedText });
+      setResult({ ...data, query: value });
     } catch (requestError) {
       setResult(null);
       setError(requestError instanceof Error ? requestError.message : "Неизвестная ошибка.");
@@ -75,6 +77,20 @@ export default function Home() {
 
   function translate(event: FormEvent) {
     event.preventDefault();
+    inputRef.current?.blur();
+    void requestTranslation(text);
+  }
+
+  function handlePrimaryAction() {
+    if (hasCurrentTranslation) {
+      setText("");
+      setResult(null);
+      setError("");
+      if (inputRef.current) inputRef.current.style.height = "auto";
+      return;
+    }
+
+    inputRef.current?.blur();
     void requestTranslation(text);
   }
 
@@ -113,20 +129,19 @@ export default function Home() {
               placeholder="Слово или фраза"
               maxLength={1200}
               rows={1}
-              autoFocus
             />
             <button
-              className="submitButton"
+              className={`submitButton${hasCurrentTranslation ? " clear" : ""}`}
               type="button"
               disabled={!text.trim() || loading}
-              aria-label="Перевести"
-              onClick={() => void requestTranslation(text)}
+              aria-label={hasCurrentTranslation ? "Очистить" : "Перевести"}
+              onClick={handlePrimaryAction}
               onTouchEnd={(event) => {
                 event.preventDefault();
-                void requestTranslation(text);
+                handlePrimaryAction();
               }}
             >
-              {loading ? <span className="loader" /> : <ArrowIcon />}
+              {loading ? <span className="loader" /> : hasCurrentTranslation ? <CloseIcon /> : <ArrowIcon />}
             </button>
           </div>
         </form>
@@ -340,4 +355,8 @@ function ClickableText({ text, onWord, disabled }: {
 
 function ArrowIcon() {
   return <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h13M13 7l5 5-5 5" /></svg>;
+}
+
+function CloseIcon() {
+  return <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 7l10 10M17 7L7 17" /></svg>;
 }
