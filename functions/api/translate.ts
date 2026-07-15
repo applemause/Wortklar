@@ -169,6 +169,134 @@ type ParsedTranslation = {
   entries?: unknown[];
 };
 
+type ModelConfig = {
+  id: string;
+  output: "strict" | "json";
+  reasoningEffort?: "low" | "medium" | "high";
+};
+
+const models: ModelConfig[] = [
+  { id: "openai/gpt-oss-120b", output: "strict", reasoningEffort: "medium" },
+  { id: "llama-3.3-70b-versatile", output: "json" },
+  { id: "openai/gpt-oss-20b", output: "strict", reasoningEffort: "medium" }
+];
+
+// Cloudflare can reuse a Worker isolate between requests. This small in-memory
+// cache lets a warm isolate skip a model until Groq's Retry-After has elapsed.
+// A new isolate simply starts with the preferred model again, which is safe.
+const modelCooldowns = new Map<string, number>();
+const defaultCooldownMs = 10_000;
+
+function modelQueue(now = Date.now()) {
+  const ready = models.filter((model) => (modelCooldowns.get(model.id) ?? 0) <= now);
+  if (ready.length > 0) return ready;
+
+  // If every model is cooling down, retry the one whose limit resets first.
+  return [...models].sort((left, right) => (
+    (modelCooldowns.get(left.id) ?? 0) - (modelCooldowns.get(right.id) ?? 0)
+  ));
+}
+
+function cooldownFrom(response: Response) {
+  const seconds = Number.parseFloat(response.headers.get("retry-after") ?? "");
+  return Number.isFinite(seconds) && seconds > 0 ? seconds * 1_000 : defaultCooldownMs;
+}
+
+function responseFormat(model: ModelConfig) {
+  if (model.output === "json") return { type: "json_object" };
+
+  return {
+    type: "json_schema",
+    json_schema: {
+      name: "translation_result",
+      strict: true,
+      schema: translationSchema
+    }
+  };
+}
+
+function normalizedEntry(value: unknown) {
+  if (!value || typeof value !== "object") return null;
+  const entry = value as Record<string, unknown>;
+  const word = typeof entry.word === "string" ? entry.word.trim() : "";
+  const translation = typeof entry.translation === "string" ? entry.translation.trim() : "";
+  if (!word || !translation) return null;
+
+  const types = new Set(["noun", "verb", "adjective", "phrase", "other"]);
+  const articles = new Set(["der", "die", "das"]);
+  const genders = new Set(["maskulin", "feminin", "neutral"]);
+  const auxiliaries = new Set(["haben", "sein"]);
+  const cases = new Set(["Akkusativ", "Dativ", "Genitiv"]);
+  const nullableString = (field: unknown) => typeof field === "string" && field.trim() ? field.trim() : null;
+
+  const government = Array.isArray(entry.government)
+    ? entry.government.flatMap((item) => {
+      if (!item || typeof item !== "object") return [];
+      const rule = item as Record<string, unknown>;
+      if (typeof rule.pattern !== "string" || typeof rule.meaning !== "string") return [];
+      return [{
+        pattern: rule.pattern.trim(),
+        case: typeof rule.case === "string" && cases.has(rule.case) ? rule.case : null,
+        meaning: rule.meaning.trim()
+      }];
+    }).slice(0, 3)
+    : [];
+
+  const grammarNotes = Array.isArray(entry.grammarNotes)
+    ? entry.grammarNotes.flatMap((item) => {
+      if (!item || typeof item !== "object") return [];
+      const note = item as Record<string, unknown>;
+      if (typeof note.label !== "string" || typeof note.value !== "string") return [];
+      return [{ label: note.label.trim(), value: note.value.trim() }];
+    }).slice(0, 4)
+    : [];
+
+  const examples = Array.isArray(entry.examples)
+    ? entry.examples.flatMap((item) => {
+      if (!item || typeof item !== "object") return [];
+      const example = item as Record<string, unknown>;
+      if (typeof example.german !== "string" || typeof example.russian !== "string") return [];
+      return [{ german: example.german.trim(), russian: example.russian.trim() }];
+    }).filter((item) => item.german && item.russian).slice(0, 3)
+    : [];
+
+  return {
+    type: typeof entry.type === "string" && types.has(entry.type) ? entry.type : "other",
+    word,
+    translation,
+    article: typeof entry.article === "string" && articles.has(entry.article) ? entry.article : null,
+    plural: nullableString(entry.plural),
+    gender: typeof entry.gender === "string" && genders.has(entry.gender) ? entry.gender : null,
+    infinitive: nullableString(entry.infinitive),
+    preterite: nullableString(entry.preterite),
+    participle: nullableString(entry.participle),
+    auxiliary: typeof entry.auxiliary === "string" && auxiliaries.has(entry.auxiliary) ? entry.auxiliary : null,
+    comparative: nullableString(entry.comparative),
+    superlative: nullableString(entry.superlative),
+    government,
+    grammarNotes,
+    examples
+  };
+}
+
+function normalizedTranslation(value: unknown): ParsedTranslation | null {
+  if (!value || typeof value !== "object") return null;
+  const parsed = value as Record<string, unknown>;
+  if ((parsed.kind !== "term" && parsed.kind !== "sentence") || typeof parsed.translation !== "string") {
+    return null;
+  }
+
+  return {
+    kind: parsed.kind,
+    correctedInput: typeof parsed.correctedInput === "string" ? parsed.correctedInput : null,
+    translation: parsed.translation.trim(),
+    explanation: typeof parsed.explanation === "string" ? parsed.explanation : "",
+    entries: Array.isArray(parsed.entries)
+      ? parsed.entries.map(normalizedEntry).filter((entry) => entry !== null).slice(0, 3)
+      : []
+  };
+}
+
 function hasExpectedLanguage(value: string, targetLanguage: "ru" | "de") {
   const hasCyrillic = /[А-Яа-яЁё]/.test(value);
   return targetLanguage === "ru" ? hasCyrillic : !hasCyrillic && /[A-Za-zÄÖÜäöüß]/.test(value);
@@ -192,8 +320,6 @@ export async function onRequestPost(context: PagesContext): Promise<Response> {
       context.env.GROQ_API_KEY ??
       ""
     ).trim();
-    const model = "openai/gpt-oss-120b";
-
     if (!text) return json({ error: "Введите текст для перевода." }, 400);
     if (!apiKey) return json({ error: "Секрет Groq API не настроен на сервере." }, 500);
 
@@ -201,80 +327,99 @@ export async function onRequestPost(context: PagesContext): Promise<Response> {
       ? `Исходный язык: русский. Целевой язык: немецкий. Переведи и разбери немецкий результат. Все пояснения дай по-русски. Текст: ${text}`
       : `Исходный язык: немецкий. Целевой язык: русский. Переведи и разбери немецкий оригинал. Все пояснения дай по-русски. Текст: ${text}`;
 
-    for (let attempt = 0; attempt < 2; attempt += 1) {
-      const retryInstruction = attempt === 0 ? "" : targetLanguage === "ru"
-        ? "\nКРИТИЧЕСКИ ВАЖНО: предыдущий ответ был отклонён. Верни translation только на русском языке. Для term оставь explanation пустым, а частые значения оформи отдельными entries."
-        : "\nКРИТИЧЕСКИ ВАЖНО: предыдущий ответ был отклонён. Верни translation только на немецком языке. Для term оставь explanation пустым, а частые значения оформи отдельными entries.";
+    let rateLimitedModels = 0;
+    let shortestRetryMs = Number.POSITIVE_INFINITY;
 
-      const response = await fetch("https://api.groq.com/openai/v1/chat/completions", {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${apiKey}`,
-          "Content-Type": "application/json"
-        },
-        body: JSON.stringify({
-          model,
+    for (const model of modelQueue()) {
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        const retryInstruction = attempt === 0 ? "" : targetLanguage === "ru"
+          ? "\nКРИТИЧЕСКИ ВАЖНО: предыдущий ответ был отклонён. Верни translation только на русском языке. Для term оставь explanation пустым, а частые значения оформи отдельными entries."
+          : "\nКРИТИЧЕСКИ ВАЖНО: предыдущий ответ был отклонён. Верни translation только на немецком языке. Для term оставь explanation пустым, а частые значения оформи отдельными entries.";
+
+        const requestBody: Record<string, unknown> = {
+          model: model.id,
           messages: [
             { role: "system", content: systemPrompt },
             { role: "user", content: `${userPrompt}${retryInstruction}` }
           ],
-          reasoning_effort: "medium",
           max_completion_tokens: 2800,
-          response_format: {
-            type: "json_schema",
-            json_schema: {
-              name: "translation_result",
-              strict: true,
-              schema: translationSchema
-            }
-          }
-        })
-      });
+          response_format: responseFormat(model)
+        };
+        if (model.reasoningEffort) requestBody.reasoning_effort = model.reasoningEffort;
 
-      const payload = await response.json() as {
-        error?: { message?: string };
-        choices?: Array<{ message?: { content?: string } }>;
-      };
-
-      if (!response.ok) {
-        return json({ error: payload.error?.message || "Groq API вернул ошибку." }, response.status);
-      }
-
-      const outputText = payload.choices?.[0]?.message?.content;
-      if (!outputText) continue;
-
-      const cleaned = outputText.replace(/^```json\s*/i, "").replace(/```$/i, "").trim();
-      const parsed = JSON.parse(cleaned) as ParsedTranslation;
-      if (parsed.translation) {
-        parsed.translation = normalizeTranslation(parsed.translation, targetLanguage);
-      }
-      const validShape = parsed.translation && parsed.kind && Array.isArray(parsed.entries);
-      const validTerm = parsed.kind !== "term" || (
-        parsed.entries!.length >= 1 &&
-        parsed.entries!.length <= 3 &&
-        !parsed.explanation?.trim()
-      );
-
-      if (!validShape || !validTerm || !hasExpectedLanguage(parsed.translation!, targetLanguage)) {
-        continue;
-      }
-
-      if (parsed.kind === "sentence") {
-        parsed.entries = [];
-      } else if (parsed.entries!.length > 1) {
-        parsed.entries = parsed.entries!.map((entry) => {
-          if (!entry || typeof entry !== "object") return entry;
-          const typedEntry = entry as Record<string, unknown>;
-          return {
-            ...typedEntry,
-            examples: Array.isArray(typedEntry.examples) ? typedEntry.examples.slice(0, 1) : []
-          };
+        const response = await fetch("https://api.groq.com/openai/v1/chat/completions", {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${apiKey}`,
+            "Content-Type": "application/json"
+          },
+          body: JSON.stringify(requestBody)
         });
+
+        const payload = await response.json() as {
+          error?: { message?: string };
+          choices?: Array<{ message?: { content?: string } }>;
+        };
+
+        if (response.status === 429) {
+          const cooldownMs = cooldownFrom(response);
+          modelCooldowns.set(model.id, Date.now() + cooldownMs);
+          shortestRetryMs = Math.min(shortestRetryMs, cooldownMs);
+          rateLimitedModels += 1;
+          break;
+        }
+
+        if (!response.ok) {
+          return json({ error: payload.error?.message || "Groq API вернул ошибку." }, response.status);
+        }
+
+        const outputText = payload.choices?.[0]?.message?.content;
+        if (!outputText) continue;
+
+        const cleaned = outputText.replace(/^```json\s*/i, "").replace(/```$/i, "").trim();
+        let parsed: ParsedTranslation | null = null;
+        try {
+          parsed = normalizedTranslation(JSON.parse(cleaned));
+        } catch {
+          continue;
+        }
+        if (!parsed?.translation) continue;
+
+        parsed.translation = normalizeTranslation(parsed.translation, targetLanguage);
+        const validTerm = parsed.kind !== "term" || (
+          parsed.entries!.length >= 1 &&
+          parsed.entries!.length <= 3 &&
+          !parsed.explanation?.trim()
+        );
+
+        if (!validTerm || !hasExpectedLanguage(parsed.translation, targetLanguage)) continue;
+
+        if (parsed.kind === "sentence") {
+          parsed.entries = [];
+        } else if (parsed.entries!.length > 1) {
+          parsed.entries = parsed.entries!.map((entry) => {
+            const typedEntry = entry as Record<string, unknown>;
+            return {
+              ...typedEntry,
+              examples: Array.isArray(typedEntry.examples) ? typedEntry.examples.slice(0, 1) : []
+            };
+          });
+        }
+
+        parsed.explanation = "";
+        modelCooldowns.delete(model.id);
+
+        return json({ ...parsed, sourceLanguage, targetLanguage });
       }
+    }
 
-      parsed.explanation = "";
-
-      return json({ ...parsed, sourceLanguage, targetLanguage });
+    if (rateLimitedModels > 0) {
+      const retrySeconds = Number.isFinite(shortestRetryMs)
+        ? Math.max(1, Math.ceil(shortestRetryMs / 1_000))
+        : 10;
+      return json({
+        error: `Все доступные модели временно заняты. Повторите через ${retrySeconds} сек.`
+      }, 429);
     }
 
     return json({ error: "Не удалось получить перевод на нужном языке. Повторите запрос." }, 502);
