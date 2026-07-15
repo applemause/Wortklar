@@ -11,6 +11,7 @@ const systemPrompt = `Ты — точный русско-немецкий уче
 Верни только JSON без markdown в формате:
 {
   "kind": "term|sentence",
+  "hasMultipleTranslations": true,
   "correctedInput": "исправленный исходный текст или null",
   "translation": "основной естественный перевод",
   "explanation": "",
@@ -50,10 +51,14 @@ const systemPrompt = `Ты — точный русско-немецкий уче
 - Сначала исправь орфографию исходного текста. correctedInput содержит только исправленный исходный текст, если он отличается хотя бы регистром или буквой; иначе null. Никогда не помещай туда перевод.
 - kind="sentence" для полноценного предложения. Для предложения верни только translation, correctedInput при необходимости, пустую explanation и пустой массив entries. Не делай словарный разбор и не создавай примеры.
 - kind="term" для одного слова или короткого словарного выражения. Для него верни от одного до трёх entries.
+- Для предложения hasMultipleTranslations всегда false. Для слова поставь true, если в заданном направлении есть 2-3 самостоятельных частых перевода или значения, иначе false.
+- Если hasMultipleTranslations=true, обязательно верни 2-3 entries. Если false — один entry. Никогда не объединяй варианты запятыми, слешами или союзами внутри translation или entry.word.
 - Первый entry — основное, самое частое значение и должен соответствовать полю translation.
 - Добавляй второй или третий entry только для действительно частых самостоятельных значений или частых вариантов перевода. Не добавляй редкие, книжные и устаревшие значения и не заполняй список близкими синонимами ради количества.
 - При переводе немецкого слова на русский для разных значений можно повторять немецкое entry.word, но entries[].translation должны ясно и коротко различать русские значения.
-- При переводе русского слова на немецкий каждое частое немецкое соответствие оформляй отдельным entry со своей грамматикой.
+- Правило нескольких значений симметрично и одинаково важно для обоих направлений: немецкий → русский и русский → немецкий.
+- При переводе русского слова на немецкий каждое частое немецкое соответствие оформляй отдельным entry со своей грамматикой. Например, для «считать» частые разные употребления могут требовать zählen, rechnen и jemanden/etwas für ... halten; нельзя оставлять только первый вариант.
+- При переводе немецкого слова на русский каждое частое русское значение оформляй отдельным entry. Например, для Schloss нужны отдельные значения «замок (дворец)» и «замок (механизм)», даже если немецкое слово совпадает.
 - Никогда не смешивай разные словарные формы в одном entry. Если пример использует anhalten, festhalten, aufhalten или другой отделяемый/производный глагол, entry.word и infinitive должны содержать именно эту полную форму, а значение должно быть отдельным entry.
 - Для частотных многозначных глаголов обязательно показывай 2-3 наиболее полезных значения или устойчивых конструкции. Например, для halten нельзя ограничиваться только «держать»: полезные частые варианты вроде anhalten и an etwas festhalten должны быть отдельными entries, если они используются в примерах.
 - Для kind="term" всегда оставляй explanation пустой строкой. Никогда не перечисляй значения предложением и не пиши фразы вроде «глагол имеет несколько значений». Каждое значение должно быть отдельным entry.
@@ -81,6 +86,7 @@ const translationSchema = {
   type: "object",
   properties: {
     kind: { type: "string", enum: ["term", "sentence"] },
+    hasMultipleTranslations: { type: "boolean" },
     correctedInput: { type: ["string", "null"] },
     translation: { type: "string" },
     explanation: { type: "string" },
@@ -153,7 +159,7 @@ const translationSchema = {
       }
     }
   },
-  required: ["kind", "correctedInput", "translation", "explanation", "entries"],
+  required: ["kind", "hasMultipleTranslations", "correctedInput", "translation", "explanation", "entries"],
   additionalProperties: false
 };
 
@@ -163,6 +169,7 @@ function json(data: unknown, status = 200) {
 
 type ParsedTranslation = {
   kind?: "term" | "sentence";
+  hasMultipleTranslations?: boolean;
   correctedInput?: string | null;
   translation?: string;
   explanation?: string;
@@ -288,6 +295,7 @@ function normalizedTranslation(value: unknown): ParsedTranslation | null {
 
   return {
     kind: parsed.kind,
+    hasMultipleTranslations: parsed.hasMultipleTranslations === true,
     correctedInput: typeof parsed.correctedInput === "string" ? parsed.correctedInput : null,
     translation: parsed.translation.trim(),
     explanation: typeof parsed.explanation === "string" ? parsed.explanation : "",
@@ -389,6 +397,7 @@ export async function onRequestPost(context: PagesContext): Promise<Response> {
         const validTerm = parsed.kind !== "term" || (
           parsed.entries!.length >= 1 &&
           parsed.entries!.length <= 3 &&
+          (!parsed.hasMultipleTranslations || parsed.entries!.length >= 2) &&
           !parsed.explanation?.trim()
         );
 
