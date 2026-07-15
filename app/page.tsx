@@ -201,8 +201,6 @@ export default function Home() {
               )}
             </div>
 
-            {result.kind === "term" && <GrammarDisclosure entries={result.entries} />}
-
             {result.kind === "term" && result.entries.length > 0 && (
               <div className={`entries ${result.entries.length === 1 ? "single" : "multiple"}`}>
                 {result.entries.map((entry, index) => (
@@ -215,6 +213,8 @@ export default function Home() {
                 ))}
               </div>
             )}
+
+            {result.kind === "term" && <GrammarDisclosure entries={result.entries} />}
           </section>
         )}
       </div>
@@ -299,9 +299,8 @@ function GrammarDisclosure({ entries }: { entries: Entry[] }) {
 
   return (
     <details className="grammarDisclosure">
-      <summary>
-        <span>грамматика</span>
-        <ChevronIcon />
+      <summary aria-label="Грамматика" title="Грамматика">
+        <QuestionIcon />
       </summary>
       <div className="grammarContent">
         {uniqueNotes.length > 0 && (
@@ -472,6 +471,11 @@ function CloseIcon() {
   return <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 7l10 10M17 7L7 17" /></svg>;
 }
 
-function ChevronIcon() {
-  return <svg viewBox="0 0 16 16" aria-hidden="true"><path d="m4 6 4 4 4-4" /></svg>;
+function QuestionIcon() {
+  return (
+    <svg viewBox="0 0 16 16" aria-hidden="true">
+      <circle cx="8" cy="8" r="6.25" />
+      <path d="M6.35 6.25a1.75 1.75 0 0 1 3.4.58c0 1.42-1.75 1.55-1.75 2.7M8 11.8h.01" />
+    </svg>
+  );
 }
